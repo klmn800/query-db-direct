@@ -15,12 +15,11 @@ An intelligent database exploration tool that automatically analyzes SQLite data
 ## Installation
 
 ```bash
-# Clone or download the tool
-git clone https://github.com/klmn800/solutions-laboratory.git
-cd solutions-laboratory/query_db_direct
+# Clone the tool
+git clone https://github.com/klmn800/query-db-direct.git
+cd query-db-direct
 
-# Install dependencies
-pip install -r requirements.txt
+# No dependencies required - uses Python standard library only
 ```
 
 ## Quick Start
@@ -124,7 +123,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-This tool is part of the [Solutions Laboratory](https://github.com/klmn800/solutions-laboratory) project. Contributions, suggestions, and feedback are welcome!
+This tool was developed as part of the [Solutions Laboratory](https://github.com/klmn800/solutions-laboratory) project. Contributions, suggestions, and feedback are welcome!
 
 ## Author
 
