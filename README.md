@@ -1,16 +1,18 @@
 # Generic SQLite Database Query Tool
 
-An intelligent database exploration tool that automatically analyzes SQLite databases and suggests useful queries based on schema discovery.
+An intelligent, **read-only** database exploration tool that automatically analyzes SQLite databases and suggests useful queries based on schema discovery.
+
+Built primarily for AI agents and CLI workflows. Read-only is enforced at the SQLite layer (URI `?mode=ro`), so this tool can be pointed at any database without risk of accidental mutation. For writes, use a tool built for that purpose.
 
 ## Features
 
-- **Smart Schema Analysis**: Automatically detects column types, relationships, and data patterns
+- **Read-only by default**: Destructive SQL like `DELETE`, `DROP`, `UPDATE`, `INSERT` is rejected by SQLite itself, not by string-matching. Safe for exploratory work and agent-driven querying.
+- **Smart Schema Analysis**: Automatically detects column types, date/numeric/text categories, and naming patterns
 - **Dynamic Query Generation**: Suggests contextual queries based on your data structure
 - **Multiple Output Formats**: Clean table format, structured JSON, or CSV export
-- **Multi-query Support**: Execute multiple SQL statements in sequence
+- **Multi-statement queries**: `--sql` accepts multiple `;`-separated statements in one invocation
 - **CSV Export**: Direct export of query results to spreadsheet-friendly format
-- **Connection Safety**: Uses proper SQLite context managers to prevent resource leaks
-- **Error-friendly**: Helpful suggestions when queries fail with intelligent error handling
+- **Error-friendly**: Lists available tables when you typo a name, errors clearly if the database file doesn't exist (instead of silently creating an empty one)
 
 ## Installation
 
@@ -45,13 +47,13 @@ python query_db_direct.py --tables --db your_data.db
 
 | Option | Description |
 |--------|-------------|
-| `--db DATABASE` | Path to SQLite database file (required) |
+| `--db DATABASE` | Path to SQLite database file (must exist; tool errors out otherwise) |
 | `--analyze` | Perform comprehensive database analysis |
 | `--suggest` | Generate intelligent query suggestions |
 | `--tables` | List all tables in the database |
-| `--sql "QUERY"` | Execute raw SQL query |
+| `--sql "QUERY"` | Execute raw SQL query (read-only; multiple `;`-separated statements OK) |
 | `--csv "QUERY"` | Execute query and export results to CSV |
-| `--csv-file FILE` | Specify CSV output filename (use with --csv) |
+| `--csv-file FILE` | Specify CSV output filename (use with `--csv`) |
 | `--json` | Output results in JSON format |
 | `--help` | Show help message |
 
@@ -82,6 +84,7 @@ news_sentiment (50 rows)
 
 ## Use Cases
 
+- **Agent-driven querying**: Safe to hand to an AI agent — read-only by construction means the agent can't damage the database, even on a hallucinated SQL statement.
 - **Database Exploration**: Quickly understand the structure and content of unfamiliar databases
 - **Data Analysis**: Export specific datasets for analysis in Excel or other tools
 - **Development**: Test queries and explore schema during development
@@ -104,13 +107,14 @@ Based on schema analysis, the tool suggests:
 - Sample data queries to preview content
 - Date range queries for temporal data
 - Statistical queries for numeric columns
-- Join suggestions for related tables
+- **Foreign-key relationship hints** — surfaces likely FK columns based on naming patterns (e.g., `orders.user_id -> users`). These appear as insight strings, not as ready-to-run JOIN SQL.
 
 ### Safety Features
-- Uses SQLite context managers for safe connection handling
-- Read-only database access to prevent accidental modifications
-- Input validation and SQL injection protection
-- Graceful error handling with helpful error messages
+- **Read-only enforcement**: connections are opened with the SQLite URI flag `?mode=ro`. Any write statement returns `attempt to write a readonly database` instead of executing.
+- **Schema-name validation**: `--schema TABLE` is checked against `sqlite_master` before the table name is interpolated into any `PRAGMA` or `COUNT` query, and identifiers are then double-quoted per the SQL standard.
+- **Path validation**: `--db` errors out cleanly if the file doesn't exist (avoids the standard `sqlite3` behavior of silently creating an empty database on a typo'd path).
+- **Helpful errors**: when a query fails on a missing table or column, the tool suggests next steps (lists available tables, points at `--schema`).
+- **No raw-SQL filtering**: `--sql` runs whatever you give it. There's no `DROP`-detection regex or similar — the read-only mode is the safety boundary, and it's enforced at the database layer, not by string matching.
 
 ## Requirements
 

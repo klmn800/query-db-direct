@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
 Generic SQLite Database Query Tool
-A flexible tool for exploring and querying SQLite databases with intelligent schema discovery.
+A read-only tool for exploring and querying SQLite databases with intelligent schema discovery.
+
+Designed primarily for AI agents and CLI workflows. All database connections are
+opened in read-only mode -- for writes, use a tool built for that purpose. This is
+a safety AND a convenience choice: the tool can be pointed at any database without
+risk of accidental mutation.
 
 KEY FEATURES:
 - Raw SQL execution: --sql "SELECT * FROM table_name LIMIT 5"
-- Schema exploration: --schema table_name
-- Database structure discovery: --tables, --analyze
-- Multi-query support: --multi "query1; query2; query3"
-- JSON output: --json flag for structured data
+- Schema exploration: --schema table_name (validated against sqlite_master)
+- Database structure discovery: --tables, --analyze, --suggest
+- Output formats: table (default), JSON (--json), CSV (--csv)
 - Error handling with helpful suggestions
 - Works with any SQLite database
 
@@ -16,25 +20,9 @@ USAGE EXAMPLES:
     python query_db_direct.py --sql "SELECT COUNT(*) FROM users"
     python query_db_direct.py --tables
     python query_db_direct.py --schema users
-    python query_db_direct.py --multi "SELECT COUNT(*) FROM users; SELECT MAX(created_at) FROM posts"
     python query_db_direct.py --db my_data.db --analyze
 
-DESIGNED FOR:
-- Quick database exploration and analysis
-- Ad-hoc queries without writing separate scripts
-- Schema discovery for unknown databases
-- Data export and analysis workflows
-- Integration with AI coding assistants
-
-IMPROVEMENTS v2:
-- Connection safety with proper context managers
-- CSV export functionality for data analysis
-- Standardized error handling patterns
-- Enhanced schema analysis for empty databases
-- Professional code quality improvements
-
 Author: Ben Keilman
-Date: 2025-09-25
 """
 
 import sqlite3
@@ -46,36 +34,47 @@ import csv
 
 class DirectDBQuery:
     def __init__(self, db_path="database.db"):
-        """Initialize database connection with flexible path handling"""
+        """Initialize the query tool. Resolves the path; existence is enforced
+        on first connect (read-only mode requires the file to exist)."""
         self.db_path = db_path
 
         # Handle relative paths relative to current working directory
         if not os.path.isabs(self.db_path):
             self.db_path = os.path.abspath(self.db_path)
 
-    def execute_query(self, sql, params=None):
-        """Execute SQL query and return results"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row  # This makes rows act like dictionaries
-                cursor = conn.cursor()
+        if not os.path.exists(self.db_path):
+            raise FileNotFoundError("Database not found: {}".format(self.db_path))
 
-                if params:
-                    cursor.execute(sql, params)
-                else:
-                    cursor.execute(sql)
+    def _connect(self):
+        """Open a read-only SQLite connection.
 
-                results = cursor.fetchall()
-                # Convert to list of dictionaries for easier handling
-                return [dict(row) for row in results]
+        Read-only mode is enforced via SQLite's URI form (?mode=ro). This makes
+        the tool safe to point at any database -- destructive SQL like DROP,
+        DELETE, UPDATE will be rejected by SQLite itself.
+        """
+        # Convert OS path to a SQLite file URI (cross-platform).
+        # Windows: C:\foo\bar.db -> /C:/foo/bar.db -> file:/C:/foo/bar.db?mode=ro
+        # Unix:    /foo/bar.db    -> /foo/bar.db    -> file:/foo/bar.db?mode=ro
+        path_uri = self.db_path.replace("\\", "/")
+        if not path_uri.startswith("/"):
+            path_uri = "/" + path_uri
+        return sqlite3.connect("file:{}?mode=ro".format(path_uri), uri=True)
 
-        except Exception as e:
-            return {"error": "Error executing query: {}".format(e)}
+    @staticmethod
+    def _quote_ident(name):
+        """Quote an SQL identifier (table/column name) for safe interpolation.
+
+        SQL identifiers can't be passed as bind parameters, so when we need to
+        embed a table name in a query we double-quote it and escape any internal
+        quotes per the SQL standard. Used only after the identifier has been
+        validated against sqlite_master.
+        """
+        return '"' + name.replace('"', '""') + '"'
 
     def execute_raw_sql(self, sql, output_format='table'):
         """Execute raw SQL and return results in specified format"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -112,7 +111,7 @@ class DirectDBQuery:
     def get_table_names(self):
         """Get list of all table names in database"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
                 tables = [row[0] for row in cursor.fetchall()]
@@ -121,21 +120,41 @@ class DirectDBQuery:
             return []
 
     def get_table_schema(self, table_name):
-        """Get schema information for a table"""
+        """Get schema information for a table.
+
+        The table name is validated against sqlite_master before any
+        identifier interpolation, and then quoted via _quote_ident.
+        """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
+                # Whitelist check: confirm the table exists before interpolating
+                # its name into PRAGMA / COUNT statements.
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                )
+                if not cursor.fetchone():
+                    cursor.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                    )
+                    available = [r[0] for r in cursor.fetchall()]
+                    return {"error": "Table '{}' not found. Available tables: {}".format(
+                        table_name, ", ".join(available) if available else "(none)")}
+
+                quoted = self._quote_ident(table_name)
+
                 # Get column info
-                cursor.execute("PRAGMA table_info({})".format(table_name))
+                cursor.execute("PRAGMA table_info({})".format(quoted))
                 columns = cursor.fetchall()
 
                 # Get row count
-                cursor.execute("SELECT COUNT(*) FROM {}".format(table_name))
+                cursor.execute("SELECT COUNT(*) FROM {}".format(quoted))
                 row_count = cursor.fetchone()[0]
 
                 # Get indexes
-                cursor.execute("PRAGMA index_list({})".format(table_name))
+                cursor.execute("PRAGMA index_list({})".format(quoted))
                 indexes = cursor.fetchall()
 
                 schema_info = {
@@ -199,34 +218,10 @@ class DirectDBQuery:
 
         return "\n".join(output)
 
-    def execute_multi_query(self, queries, output_format='table'):
-        """Execute multiple queries and return combined results"""
-        all_outputs = []
-
-        for i, query in enumerate(queries):
-            query = query.strip()
-            if not query:
-                continue
-
-            if output_format == 'table':
-                all_outputs.append("Query {}: {}".format(i+1, query))
-                all_outputs.append("-" * 40)
-
-            result = self.execute_raw_sql(query, output_format)
-            all_outputs.append(result)
-
-            if output_format == 'table' and i < len(queries) - 1:
-                all_outputs.append("\n" + "="*60 + "\n")
-
-        if output_format == 'json':
-            return json.dumps(all_outputs, indent=2, default=str)
-        else:
-            return "\n".join(all_outputs)
-
     def export_to_csv(self, sql_query, output_file=None):
         """Export query results to CSV format"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute(sql_query)
@@ -413,7 +408,7 @@ class DirectDBQuery:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generic SQLite Database Query Tool',
+        description='Generic SQLite Database Query Tool (read-only)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -423,11 +418,8 @@ Examples:
   # Show table schema
   python query_db_direct.py --schema users
 
-  # Raw SQL query
+  # Raw SQL query (multiple ;-separated statements supported)
   python query_db_direct.py --sql "SELECT COUNT(*) FROM users"
-
-  # Multiple queries
-  python query_db_direct.py --multi "SELECT COUNT(*) FROM users; SELECT MAX(created_at) FROM posts"
 
   # JSON output
   python query_db_direct.py --sql "SELECT * FROM users LIMIT 5" --json
@@ -444,10 +436,9 @@ Examples:
         """)
 
     # Enhanced options
-    parser.add_argument('--sql', help='Execute raw SQL query')
+    parser.add_argument('--sql', help='Execute raw SQL query (read-only; multiple ;-separated statements OK)')
     parser.add_argument('--schema', help='Show schema for specified table')
     parser.add_argument('--tables', action='store_true', help='List all tables')
-    parser.add_argument('--multi', help='Execute multiple SQL queries (semicolon separated)')
     parser.add_argument('--analyze', action='store_true', help='Analyze database schema and provide insights')
     parser.add_argument('--suggest', action='store_true', help='Suggest useful queries based on schema analysis')
     parser.add_argument('--csv', help='Execute SQL query and export results to CSV')
@@ -458,8 +449,26 @@ Examples:
 
     args = parser.parse_args()
 
-    # Initialize database query object
-    db = DirectDBQuery(args.db)
+    # If no arguments provided, show help and exit before touching the filesystem.
+    if not (args.sql or args.schema or args.tables or args.analyze or args.suggest or args.csv):
+        print("Generic SQLite Database Query Tool (read-only)")
+        print("Use --help for usage information")
+        print("\nQuick start:")
+        print("  --tables     List all tables")
+        print("  --analyze    Analyze database structure")
+        print("  --suggest    Get suggested queries")
+        print("  --schema X   Show schema for table X")
+        print("  --sql 'X'    Execute SQL query X")
+        print("  --csv 'X'    Export query results to CSV")
+        return
+
+    # Validate the database exists before doing anything else.
+    try:
+        db = DirectDBQuery(args.db)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
     output_format = 'json' if args.json else 'table'
 
     # Handle enhanced features
@@ -495,12 +504,6 @@ Examples:
             print("Tables in database:")
             for table in tables:
                 print("  {}".format(table))
-        return
-
-    if args.multi:
-        queries = [q.strip() for q in args.multi.split(';') if q.strip()]
-        result = db.execute_multi_query(queries, output_format)
-        print(result)
         return
 
     if args.analyze:
@@ -554,19 +557,6 @@ Examples:
         else:
             print(result['success'])
             print("Rows exported: {}".format(result['rows']))
-        return
-
-    # If no arguments provided, show help
-    if not (args.sql or args.schema or args.tables or args.multi or args.analyze or args.suggest or args.csv):
-        print("Generic SQLite Database Query Tool")
-        print("Use --help for usage information")
-        print("\nQuick start:")
-        print("  --tables     List all tables")
-        print("  --analyze    Analyze database structure")
-        print("  --suggest    Get suggested queries")
-        print("  --schema X   Show schema for table X")
-        print("  --sql 'X'    Execute SQL query X")
-        print("  --csv 'X'    Export query results to CSV")
         return
 
 if __name__ == "__main__":
