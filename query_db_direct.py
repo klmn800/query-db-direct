@@ -31,6 +31,7 @@ import json
 import argparse
 import os
 import csv
+from pathlib import Path
 
 class DirectDBQuery:
     def __init__(self, db_path="database.db"):
@@ -51,14 +52,13 @@ class DirectDBQuery:
         Read-only mode is enforced via SQLite's URI form (?mode=ro). This makes
         the tool safe to point at any database -- destructive SQL like DROP,
         DELETE, UPDATE will be rejected by SQLite itself.
+
+        Uses pathlib.Path.as_uri() to build the file URI so paths containing
+        spaces, '#', or other URL-special characters are percent-encoded
+        correctly across Windows and Unix.
         """
-        # Convert OS path to a SQLite file URI (cross-platform).
-        # Windows: C:\foo\bar.db -> /C:/foo/bar.db -> file:/C:/foo/bar.db?mode=ro
-        # Unix:    /foo/bar.db    -> /foo/bar.db    -> file:/foo/bar.db?mode=ro
-        path_uri = self.db_path.replace("\\", "/")
-        if not path_uri.startswith("/"):
-            path_uri = "/" + path_uri
-        return sqlite3.connect("file:{}?mode=ro".format(path_uri), uri=True)
+        uri = Path(self.db_path).as_uri() + "?mode=ro"
+        return sqlite3.connect(uri, uri=True)
 
     @staticmethod
     def _quote_ident(name):
@@ -317,54 +317,64 @@ class DirectDBQuery:
         return analysis
 
     def _generate_table_queries(self, table_name, table_analysis):
-        """Generate useful queries for a specific table"""
+        """Generate useful queries for a specific table.
+
+        Identifiers in the generated SQL are quoted via _quote_ident so the
+        suggestions remain valid for tables/columns with spaces, hyphens,
+        or names that collide with SQL keywords. The 'name' and 'description'
+        fields keep raw names for display readability.
+        """
         queries = []
+        qt = self._quote_ident(table_name)
 
         # Basic exploration queries
         if table_analysis['row_count'] > 0:
             queries.append({
                 'name': f'sample_{table_name}',
                 'description': f'Sample data from {table_name}',
-                'sql': f'SELECT * FROM {table_name} LIMIT 5'
+                'sql': f'SELECT * FROM {qt} LIMIT 5'
             })
 
             queries.append({
                 'name': f'count_{table_name}',
                 'description': f'Total rows in {table_name}',
-                'sql': f'SELECT COUNT(*) as total_rows FROM {table_name}'
+                'sql': f'SELECT COUNT(*) as total_rows FROM {qt}'
             })
 
         # Date-based queries
         if table_analysis['date_columns']:
             date_col = table_analysis['date_columns'][0]
+            qd = self._quote_ident(date_col)
             queries.append({
                 'name': f'recent_{table_name}',
                 'description': f'Recent records from {table_name}',
-                'sql': f'SELECT * FROM {table_name} ORDER BY {date_col} DESC LIMIT 10'
+                'sql': f'SELECT * FROM {qt} ORDER BY {qd} DESC LIMIT 10'
             })
 
             queries.append({
                 'name': f'date_range_{table_name}',
                 'description': f'Date range in {table_name}',
-                'sql': f'SELECT MIN({date_col}) as earliest, MAX({date_col}) as latest FROM {table_name}'
+                'sql': f'SELECT MIN({qd}) as earliest, MAX({qd}) as latest FROM {qt}'
             })
 
         # Numeric analysis
         for num_col in table_analysis['numeric_columns'][:3]:  # Limit to first 3
             if 'id' not in num_col.lower():  # Skip ID columns
+                qn = self._quote_ident(num_col)
                 queries.append({
                     'name': f'stats_{table_name}_{num_col}',
                     'description': f'Statistics for {num_col} in {table_name}',
-                    'sql': f'SELECT AVG({num_col}) as avg_{num_col}, MIN({num_col}) as min_{num_col}, MAX({num_col}) as max_{num_col} FROM {table_name}'
+                    'sql': f'SELECT AVG({qn}) as avg_{num_col}, MIN({qn}) as min_{num_col}, MAX({qn}) as max_{num_col} FROM {qt}'
                 })
 
         # Text analysis
         for text_col in table_analysis['text_columns'][:2]:  # Limit to first 2
             if any(keyword in text_col.lower() for keyword in ['title', 'name', 'description', 'summary']):
+                qx = self._quote_ident(text_col)
                 queries.append({
                     'name': f'popular_{text_col}_{table_name}',
                     'description': f'Most common values in {text_col}',
-                    'sql': f'SELECT {text_col}, COUNT(*) as frequency FROM {table_name} GROUP BY {text_col} ORDER BY frequency DESC LIMIT 10'
+                    'sql': f'SELECT {qx}, COUNT(*) as frequency FROM {qt} GROUP BY {qx} ORDER BY frequency DESC LIMIT 10'
                 })
 
         return queries
